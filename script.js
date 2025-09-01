@@ -1,5 +1,5 @@
 // ------------------------ 配置区 ------------------------
-const SUBMIT_ENDPOINT = '/api/feishu.js'; // Vercel 后端相对路径
+const SUBMIT_ENDPOINT = '/api/feishu'; // Vercel 后端相对路径
 const USE_CARD = false;                // true=发送飞书卡片消息；false=发送纯文本
 const AUTO_SCROLL = true;              // 显示新消息时自动滚动
 // ------------------------------------------------------
