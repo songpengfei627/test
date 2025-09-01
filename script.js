@@ -1,30 +1,26 @@
-/*******************************
- * 纯前端直连飞书 Webhook 版本
- * ⚠️ 风险：Webhook 暴露在前端，任何人可滥用
- *******************************/
+/********************************************
+ * 方案 B：纯前端直连飞书 Webhook（尽力而为）
+ * ⚠️ 风险：Webhook 暴露在前端；跨域不可读结果
+ ********************************************/
 
-// ========== 配置区 ==========
-const USE_DIRECT_FEISHU = true; // true=前端直连飞书；false=走你后端（/api/feishu）
-const FEISHU_WEBHOOK_URL = 'https://open.feishu.cn/open-apis/bot/v2/hook/6435c441-cb0c-44e3-9d97-ea4a38fb82c5';
+// ====== 配置区 ======
+const FEISHU_WEBHOOK_URL = 'https://open.feishu.cn/open-apis/bot/v2/hook/6435c441-cb0c-44e3-9d97-ea4a38fb82c5'; // ← 必改
+const USE_CARD = false;           // true：发送卡片；false：发送纯文本
+const AUTO_SCROLL = true;         // 新消息自动滚动
+// ====================
 
-// 如果改为后端转发，只要把上面改成：const USE_DIRECT_FEISHU = false;
-// 并确保你的后端已部署好，然后设置：
-const BACKEND_ENDPOINT = '/api/feishu'; // 走同域 Vercel/后端时使用
-// ===========================
-
-
-// ---------- DOM 引用 ----------
+// DOM
 const chatLog   = document.getElementById('chat-log');
 const userInput = document.getElementById('user-input');
 const sendBtn   = document.getElementById('send-btn');
 
-// ---------- 状态 ----------
-let stage = 0;  // 0: 询问需求 -> 1: 推荐 -> 2: 结束并上报
-const userMessages = [];
-let submitted = false;
+// 状态
+let stage = 0; // 0: 询问需求 -> 1: 推荐 -> 2: 结束并上报
+const userMessages = []; // 仅缓存用户输入
+let submitted = false;   // 防重复提交
 const convoId = Math.random().toString(36).slice(2, 10);
 
-// ---------- UI：渲染气泡 ----------
+// 工具：渲染气泡
 function createMsg(text, sender) {
   const wrap = document.createElement('div');
   wrap.className = 'msg-wrapper ' + sender;
@@ -44,16 +40,16 @@ function createMsg(text, sender) {
     wrap.appendChild(avatar);
   }
   chatLog.appendChild(wrap);
-  chatLog.scrollTop = chatLog.scrollHeight;
+  if (AUTO_SCROLL) chatLog.scrollTop = chatLog.scrollHeight;
 }
 
-// ---------- 初始化 ----------
+// 初始化
 window.addEventListener('load', () => {
   createMsg('我是您的智能客服，很高兴为您服务。这里有什么可以帮到您的？例如，您可以输入“推荐一款台灯”。', 'bot');
   userInput?.focus();
 });
 
-// ---------- 机器人回复 ----------
+// 机器人阶段回复
 function botRespond() {
   if (stage === 0) {
     createMsg(
@@ -69,15 +65,15 @@ function botRespond() {
 
     setTimeout(() => {
       createMsg('🎉 感谢您的反馈，本轮对话已结束，您的服务代码是<b>TC100</b>，请返回问卷继续作答。', 'bot');
-      // 结束时一次性上报
+      // 对话结束：一次性上报
       submitAllMessagesOnce();
     }, 800);
   }
   stage++;
 }
 
-// ---------- 构建上报负载 ----------
-function buildFeishuTextPayload() {
+// ====== 飞书负载构建 ======
+function makeTextPayload() {
   const lines = userMessages.map((m, i) => `${i + 1}) ${m.text}`).join('\n');
   return {
     msg_type: 'text',
@@ -85,8 +81,7 @@ function buildFeishuTextPayload() {
   };
 }
 
-// （可选）卡片格式，如果以后需要更美观
-function buildFeishuCardPayload() {
+function makeCardPayload() {
   const codeBlock = userMessages.map((m, i) => `${i + 1}) ${m.text}`).join('\n');
   return {
     msg_type: 'interactive',
@@ -101,12 +96,13 @@ function buildFeishuCardPayload() {
     }
   };
 }
+// ==========================
 
-// ---------- 直连飞书：A. sendBeacon ----------
-function trySendBeaconToFeishu(payloadObj) {
+// A. 首选 sendBeacon（无预检、不可读结果）
+function trySendBeacon(payloadObj) {
   try {
     const blob = new Blob([JSON.stringify(payloadObj)], { type: 'application/json' });
-    // sendBeacon 不会预检，但拿不到结果（返回 boolean 表示“尝试发送”）
+    // 返回 boolean：仅表示“尝试提交”，不代表服务端已接收
     return navigator.sendBeacon(FEISHU_WEBHOOK_URL, blob);
   } catch (e) {
     console.debug('sendBeacon error (ignored):', e);
@@ -114,13 +110,14 @@ function trySendBeaconToFeishu(payloadObj) {
   }
 }
 
-// ---------- 直连飞书：B. no-cors fetch（兜底） ----------
-async function tryNoCorsFetchToFeishu(payloadObj) {
+// B. 兜底 no-cors fetch（必须避免预检；不可读结果）
+async function tryNoCorsFetch(payloadObj) {
   try {
     await fetch(FEISHU_WEBHOOK_URL, {
       method: 'POST',
-      mode: 'no-cors', // 生成 opaque 请求，无法读取响应；避免预检
-      headers: { 'Content-Type': 'text/plain' }, // 不用 application/json，避免预检
+      mode: 'no-cors',            // 生成 opaque 请求，浏览器不校验也不返回可读体
+      credentials: 'omit',        // 关键：绝不能 'include'，否则预检更严格
+      headers: { 'Content-Type': 'text/plain' }, // 不能用 application/json，否则触发预检
       body: JSON.stringify(payloadObj)
     });
     return true;
@@ -130,44 +127,22 @@ async function tryNoCorsFetchToFeishu(payloadObj) {
   }
 }
 
-// ---------- 通过你自己的后端（更安全） ----------
-async function submitViaBackend(payloadObj) {
-  try {
-    await fetch(BACKEND_ENDPOINT, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payloadObj)
-    });
-    return true;
-  } catch (e) {
-    console.debug('backend fetch error (ignored):', e);
-    return false;
-  }
-}
-
-// ---------- 一次性上报（静默，不在 UI 提示） ----------
+// 一次性上报（静默）
 async function submitAllMessagesOnce() {
   if (submitted) return;
   submitted = true;
 
-  // 默认用文本消息；需要卡片就把 payload 换成 buildFeishuCardPayload()
-  const feishuPayload = buildFeishuTextPayload();
+  const payload = USE_CARD ? makeCardPayload() : makeTextPayload();
 
-  if (USE_DIRECT_FEISHU) {
-    // A. 先用 sendBeacon（无需预检）
-    const sent = trySendBeaconToFeishu(feishuPayload);
-    if (sent) return;
+  // 先用 sendBeacon
+  const sent = trySendBeacon(payload);
+  if (sent) return;
 
-    // B. 失败则 no-cors 兜底
-    await tryNoCorsFetchToFeishu(feishuPayload);
-    return;
-  }
-
-  // 方案二：走后端（推荐生产）
-  await submitViaBackend({ msgType: 'text', text: feishuPayload.content.text });
+  // 失败则 no-cors 兜底
+  await tryNoCorsFetch(payload);
 }
 
-// ---------- 发送消息 ----------
+// 发送消息
 async function sendMessage() {
   const text = (userInput?.value || '').trim();
   if (!text) return;
@@ -176,7 +151,7 @@ async function sendMessage() {
   userInput.value = '';
   sendBtn.disabled = true;
 
-  // 只缓存，不立刻上报
+  // 只缓存，不立刻上传
   userMessages.push({ text, stage, ts: new Date().toISOString() });
 
   setTimeout(() => {
@@ -185,9 +160,8 @@ async function sendMessage() {
   }, 600);
 }
 
-// ---------- 事件绑定 ----------
+// 事件绑定
 sendBtn?.addEventListener('click', sendMessage);
-userInput?.addEventListener('keydown', e => {
+userInput?.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.isComposing) sendMessage();
 });
-
