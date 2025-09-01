@@ -1,21 +1,30 @@
-// ------------------------ 配置区 ------------------------
-const SUBMIT_ENDPOINT = '/api/feishu'; // Vercel 后端相对路径
-const USE_CARD = false;                // true=发送飞书卡片消息；false=发送纯文本
-const AUTO_SCROLL = true;              // 显示新消息时自动滚动
-// ------------------------------------------------------
+/*******************************
+ * 纯前端直连飞书 Webhook 版本
+ * ⚠️ 风险：Webhook 暴露在前端，任何人可滥用
+ *******************************/
 
-// DOM 引用
+// ========== 配置区 ==========
+const USE_DIRECT_FEISHU = true; // true=前端直连飞书；false=走你后端（/api/feishu）
+const FEISHU_WEBHOOK_URL = 'https://open.feishu.cn/open-apis/bot/v2/hook/6435c441-cb0c-44e3-9d97-ea4a38fb82c5';
+
+// 如果改为后端转发，只要把上面改成：const USE_DIRECT_FEISHU = false;
+// 并确保你的后端已部署好，然后设置：
+const BACKEND_ENDPOINT = '/api/feishu'; // 走同域 Vercel/后端时使用
+// ===========================
+
+
+// ---------- DOM 引用 ----------
 const chatLog   = document.getElementById('chat-log');
 const userInput = document.getElementById('user-input');
 const sendBtn   = document.getElementById('send-btn');
 
-// 对话状态
-let stage = 0; // 0: 询问需求 -> 1: 推荐 -> 2: 结束上报
-const userMessages = []; // 仅保存“用户”侧输入
-let submitted = false;   // 防止重复上报
+// ---------- 状态 ----------
+let stage = 0;  // 0: 询问需求 -> 1: 推荐 -> 2: 结束并上报
+const userMessages = [];
+let submitted = false;
 const convoId = Math.random().toString(36).slice(2, 10);
 
-// 工具：渲染一条对话气泡
+// ---------- UI：渲染气泡 ----------
 function createMsg(text, sender) {
   const wrap = document.createElement('div');
   wrap.className = 'msg-wrapper ' + sender;
@@ -34,18 +43,17 @@ function createMsg(text, sender) {
     wrap.appendChild(bubble);
     wrap.appendChild(avatar);
   }
-
   chatLog.appendChild(wrap);
-  if (AUTO_SCROLL) chatLog.scrollTop = chatLog.scrollHeight;
+  chatLog.scrollTop = chatLog.scrollHeight;
 }
 
-// 入口：页面载入后发首条欢迎消息
+// ---------- 初始化 ----------
 window.addEventListener('load', () => {
   createMsg('我是您的智能客服，很高兴为您服务。这里有什么可以帮到您的？例如，您可以输入“推荐一款台灯”。', 'bot');
   userInput?.focus();
 });
 
-// 机器人回复（按阶段）
+// ---------- 机器人回复 ----------
 function botRespond() {
   if (stage === 0) {
     createMsg(
@@ -68,48 +76,98 @@ function botRespond() {
   stage++;
 }
 
-// 汇总文本（纯文本消息用）
-function makeAggregatedText() {
-  const lines = userMessages.map((m, i) => `${i + 1}) ${m.text}`);
-  return `会话ID：${convoId}\n条数：${userMessages.length}\n\n` + lines.join('\n');
-}
-
-// 生成飞书卡片（卡片消息用）
-function makeCardPayload() {
-  const codeBlock = userMessages.map((m, i) => `${i + 1}) ${m.text}`).join('\n');
+// ---------- 构建上报负载 ----------
+function buildFeishuTextPayload() {
+  const lines = userMessages.map((m, i) => `${i + 1}) ${m.text}`).join('\n');
   return {
-    config: { wide_screen_mode: true },
-    header: { template: 'turquoise', title: { tag: 'plain_text', content: '问卷对话记录' } },
-    elements: [
-      { tag: 'div', text: { tag: 'lark_md', content: `**会话ID**：${convoId}\n**条数**：${userMessages.length}` } },
-      { tag: 'hr' },
-      { tag: 'div', text: { tag: 'lark_md', content: '```\\n' + codeBlock + '\\n```' } }
-    ]
+    msg_type: 'text',
+    content: { text: `会话ID：${convoId}\n条数：${userMessages.length}\n\n${lines}` }
   };
 }
 
-// 一次性提交（静默）：先正常 fetch，失败仅写控制台，不打断 UI
+// （可选）卡片格式，如果以后需要更美观
+function buildFeishuCardPayload() {
+  const codeBlock = userMessages.map((m, i) => `${i + 1}) ${m.text}`).join('\n');
+  return {
+    msg_type: 'interactive',
+    card: {
+      config: { wide_screen_mode: true },
+      header: { template: 'turquoise', title: { tag: 'plain_text', content: '问卷对话记录' } },
+      elements: [
+        { tag: 'div', text: { tag: 'lark_md', content: `**会话ID**：${convoId}\n**条数**：${userMessages.length}` } },
+        { tag: 'hr' },
+        { tag: 'div', text: { tag: 'lark_md', content: '```\\n' + codeBlock + '\\n```' } }
+      ]
+    }
+  };
+}
+
+// ---------- 直连飞书：A. sendBeacon ----------
+function trySendBeaconToFeishu(payloadObj) {
+  try {
+    const blob = new Blob([JSON.stringify(payloadObj)], { type: 'application/json' });
+    // sendBeacon 不会预检，但拿不到结果（返回 boolean 表示“尝试发送”）
+    return navigator.sendBeacon(FEISHU_WEBHOOK_URL, blob);
+  } catch (e) {
+    console.debug('sendBeacon error (ignored):', e);
+    return false;
+  }
+}
+
+// ---------- 直连飞书：B. no-cors fetch（兜底） ----------
+async function tryNoCorsFetchToFeishu(payloadObj) {
+  try {
+    await fetch(FEISHU_WEBHOOK_URL, {
+      method: 'POST',
+      mode: 'no-cors', // 生成 opaque 请求，无法读取响应；避免预检
+      headers: { 'Content-Type': 'text/plain' }, // 不用 application/json，避免预检
+      body: JSON.stringify(payloadObj)
+    });
+    return true;
+  } catch (e) {
+    console.debug('no-cors fetch error (ignored):', e);
+    return false;
+  }
+}
+
+// ---------- 通过你自己的后端（更安全） ----------
+async function submitViaBackend(payloadObj) {
+  try {
+    await fetch(BACKEND_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payloadObj)
+    });
+    return true;
+  } catch (e) {
+    console.debug('backend fetch error (ignored):', e);
+    return false;
+  }
+}
+
+// ---------- 一次性上报（静默，不在 UI 提示） ----------
 async function submitAllMessagesOnce() {
   if (submitted) return;
   submitted = true;
 
-  const payload = USE_CARD
-    ? { msgType: 'interactive', card: makeCardPayload() }
-    : { msgType: 'text', text: makeAggregatedText() };
+  // 默认用文本消息；需要卡片就把 payload 换成 buildFeishuCardPayload()
+  const feishuPayload = buildFeishuTextPayload();
 
-  try {
-    await fetch(SUBMIT_ENDPOINT, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-  } catch (e) {
-    // 静默失败：不打扰用户，仅记录
-    console.debug('提交到后端失败（静默）:', e);
+  if (USE_DIRECT_FEISHU) {
+    // A. 先用 sendBeacon（无需预检）
+    const sent = trySendBeaconToFeishu(feishuPayload);
+    if (sent) return;
+
+    // B. 失败则 no-cors 兜底
+    await tryNoCorsFetchToFeishu(feishuPayload);
+    return;
   }
+
+  // 方案二：走后端（推荐生产）
+  await submitViaBackend({ msgType: 'text', text: feishuPayload.content.text });
 }
 
-// 发送按钮 / 回车发送
+// ---------- 发送消息 ----------
 async function sendMessage() {
   const text = (userInput?.value || '').trim();
   if (!text) return;
@@ -127,14 +185,9 @@ async function sendMessage() {
   }, 600);
 }
 
-// 事件绑定
+// ---------- 事件绑定 ----------
 sendBtn?.addEventListener('click', sendMessage);
-userInput?.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    // 避免在中文输入法合成阶段触发
-    if (e.isComposing) return;
-    sendMessage();
-  }
+userInput?.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.isComposing) sendMessage();
 });
-
 
